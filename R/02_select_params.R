@@ -93,8 +93,7 @@ breast_tcga_tune <- tune.block.splsda(
   validation = "Mfold",
   folds = 5,
   nrepeat = 2,
-  dist = "centroids.dist",
-  BPPARAM = current_bpparam
+  dist = "centroids.dist"
 )
 
 ## Get the number of selected variables for each component.
