@@ -16,7 +16,15 @@ Make sure the following are installed on your system:
 
 # Reproduciblity
 ## Report
-To reproduce the report, clone this repo then run the following in a terminal:
+To reproduce the report:  
+
+- Run the following in a R terminal:
+```{r}
+#| eval: False
+renv::restore()
+```
+
+- Run the following in your shell:
 ```
 #| eval: False
 quarto render report.qmd
