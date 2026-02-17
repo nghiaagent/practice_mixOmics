@@ -26,7 +26,6 @@ renv::restore()
 
 - Run the following in your shell:
 ```
-#| eval: False
 quarto render report.qmd
 ```
 

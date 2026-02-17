@@ -32,7 +32,6 @@ renv::restore()
 
 <!-- -->
 
-    #| eval: False
     quarto render report.qmd
 
 ## Full project
