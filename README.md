@@ -11,7 +11,10 @@ See a compiled version of the report here:
 
 # Prerequisites
 
-Make sure the following are installed on your system: - Quarto - R 4.5.1
+Make sure the following are installed on your system:
+
+- Quarto
+- R 4.5.1
 
 # Reproduciblity
 

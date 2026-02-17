@@ -9,7 +9,8 @@ This repository contains the source code, data processing scripts, and analysis 
 See a compiled version of the report here: [https://nghiaagent.github.io/practice_mixOmics/](https://nghiaagent.github.io/practice_mixOmics/)
 
 # Prerequisites
-Make sure the following are installed on your system:
+Make sure the following are installed on your system:  
+
 - Quarto
 - R 4.5.1
 
