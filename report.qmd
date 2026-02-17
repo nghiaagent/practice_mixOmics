@@ -1,0 +1,420 @@
+---
+title: "TCGA Breast Cancer Multi-omics Analysis"
+author: "Mitchell Nguyen"
+date: last-modified
+format:
+  html:
+    embed-resources: true
+    toc: true
+    number-sections: true
+    theme: cosmo
+    code-fold: true
+editor: source
+execute:
+  fig-width: 7
+  fig-height: 7
+---
+
+# Preface
+In this report, I demonstrate the use of blocked (multi-omics), sparse (selected variables), projection to latent structures discriminant analysis (sPLS-DA) to classify breast cancer subtypes using multi-omics data from the Cancer Genome Atlas (TCGA) provided as an example dataset in the mixOmics package.
+```{r}
+#| include: False
+renv::restore()
+here::i_am("report.qmd")
+
+# Import packages
+library(BiocParallel)
+library(mixOmics)
+library(patchwork)
+library(tidyverse)
+
+# Load data
+data("breast.TCGA")
+
+# Set seed
+set.seed(42)
+```
+
+# Methods
+## Dataset preparation
+The training set was loaded from the `mixOmics` package, which contains 150 breast cancer samples from three subtypes: Basal, Her2, and LumA. 
+
+```{r}
+# Build training dataset
+## Multiomics data
+breast_tcga_train <- list(
+  mrna = breast.TCGA$data.train$mrna,
+  mirna = breast.TCGA$data.train$mirna,
+  protein = breast.TCGA$data.train$protein
+)
+
+## Training data
+breast_tcga_train_outcome <- breast.TCGA$data.train$subtype
+
+## Show cancer subtypes
+table(breast_tcga_train_outcome)
+```
+
+## Parameter selection  
+
+The following parameters were selected:  
+
+1. Design matrix, defining desired weights between omics levels.
+2. Number of components, determined by cross-validation within the training set.
+3. Number of variables to select for each omics level, determined by cross-validation within the training set across multiple numbers of variables.
+
+
+### Design matrix  
+
+The design matrix was selected using cross-correlations between components associated to each omics level.
+
+```{r}
+# Select weights for sPLS-DA
+# The current dataset contains paired miRNA, mRNA, and protein data
+# The weight could be based on the pairwise correlation between them.
+## Calculate pairwise correlations using PLS
+correlations <- list(
+  # Calculate PLS between pairs of omics
+  mrna_protein = pls(
+    breast_tcga_train$mrna,
+    breast_tcga_train$protein,
+    ncomp = 1
+  ),
+  mrna_mirna = pls(
+    breast_tcga_train$mrna,
+    breast_tcga_train$mirna,
+    ncomp = 1
+  ),
+  mirna_protein = pls(
+    breast_tcga_train$mirna,
+    breast_tcga_train$protein,
+    ncomp = 1
+  )
+) %>%
+  # Calculate correlation within each PLS
+  map(\(pls) cor(pls$variates$X, pls$variates$Y))
+
+print(correlations)
+```
+
+As the range of correlation was between `{r} correlations$mirna_protein %>% as.numeric %>% round(3)` and `{r} correlations$mrna_protein %>% as.numeric %>% round(3)`, a weight of 0.85 was chosen for the design matrix.
+
+```{r}
+## Define a design matrix with 0.85 as the weight between omics.
+breast_tcga_design <- matrix(
+  0.85,
+  nrow = length(breast_tcga_train),
+  ncol = length(breast_tcga_train),
+  dimnames = list(names(breast_tcga_train), names(breast_tcga_train))
+) %>%
+  `diag<-`(0)
+
+print(breast_tcga_design)
+```
+
+### Number of components  
+
+After a block PLS-DA was performed using 5 components, 10-fold cross-validation with 10 repeats was performed.
+
+```{r}
+#| label: fig-ncomp
+#| fig-cap: "Cross-validation metrics for selecting the number of components for block sPLS-DA. X axis represents the number of component, Y axis represents the error rate."
+
+# Select number of components for sPLS-DA
+## First, fit a test block PLS-DA (non-sparse)
+## to choose the number of components
+breast_tcga_plsda_test <- block.plsda(
+  X = breast_tcga_train,
+  Y = breast_tcga_train_outcome,
+  design = breast_tcga_design,
+  ncomp = 5
+)
+
+## Test and plot model statistics
+## Use 10-fold cross-validation with 10 repeats
+breast_tcga_plsda_test_perf <- breast_tcga_plsda_test %>%
+  perf(
+    validation = "Mfold",
+    folds = 10,
+    nrepeat = 10
+  )
+
+breast_tcga_ncomp <- breast_tcga_plsda_test_perf$choice.ncomp$WeightedVote %>%
+  max()
+
+
+## Plot statistics
+plot(breast_tcga_plsda_test_perf)
+
+## Return recommendation
+message(
+  str_c(
+    "The highest recommended number of components is ",
+    max(breast_tcga_plsda_test_perf$choice.ncomp$WeightedVote),
+    "."
+  )
+)
+
+```
+
+Accordingly, block sPLS-DA was performed using `{r} max(breast_tcga_plsda_test_perf$choice.ncomp$WeightedVote)` components.
+
+### Number of variables  
+
+The number of variables for components 1 and 2 in each omics level was selected by cross-validation within the training set across multiple numbers of variables.
+
+The tested numbers of variables are `{r} c(seq(5, 9, 2), seq(10, 25, 5))`
+
+As these values take a long time to compute, they have been pre-calculated using the following code:
+
+```{r}
+#| eval: False
+breast_tcga_tune_nvars <- list(
+  mrna = c(seq(5, 9, 2), seq(10, 25, 5)),
+  mirna = c(seq(5, 9, 2), seq(10, 25, 5)),
+  protein = c(seq(5, 9, 2), seq(10, 25, 5))
+)
+
+breast_tcga_tune <- tune.block.splsda(
+  X = breast_tcga_train,
+  Y = breast_tcga_train_outcome,
+  ncomp = 2,
+  test.keepX = breast_tcga_tune_nvars,
+  design = breast_tcga_design,
+  validation = "Mfold",
+  folds = 5,
+  nrepeat = 2,
+  dist = "centroids.dist",
+  BPPARAM = current_bpparam
+)
+
+## Get the number of selected variables for each component.
+breast_tcga_keep_vars <- breast_tcga_tune$choice.keepX
+```
+
+```{r}
+# Manually define the number of variables to keep for each component based on past calculations.
+breast_tcga_keep_vars <- list(
+  mrna = c(15, 5),
+  mirna = c(20, 7),
+  protein = c(9, 5)
+)
+```
+
+## Final model
+The final block sPLS-DA model includes:  
+
+- Weight matrix with 0.85 as the weight between omics levels.
+- `{r} breast_tcga_ncomp` components.
+- `{r} breast_tcga_keep_vars$mrna` variables for mRNA components 1 and 2.
+- `{r} breast_tcga_keep_vars$mirna` variables for miRNA components 1 and 2.
+- `{r} breast_tcga_keep_vars$protein` variables for protein components 1 and 2.
+
+```{r}
+breast_tcga_splsda <- block.splsda(
+  X = breast_tcga_train,
+  Y = breast_tcga_train_outcome,
+  design = breast_tcga_design,
+  ncomp = breast_tcga_ncomp,
+  keepX = breast_tcga_keep_vars
+)
+```
+
+# Results
+## Per-sample plots
+
+These plots demonstrate the position of each samples within the model.
+
+::: {.panel-tabset}
+### Correlation between components from each omics level
+```{r}
+#| label: fig-diablo
+#| fig-cap: "Correlation between components from each omics level. Samples are represented based on their component 1 score and coloured by cancer subtype. Bottom left corner represents correlation coefficients between components 1 of each omics level. mRNA and protein data are highly correlated."
+breast_tcga_splsda %>%
+  plotDiablo(ncomp = 1)
+```
+
+All samples are clustered by cancer subtype, demonstrating the classification power of this model. The omics levels are highly correlated, with correlation coefficients ranging from 0.8 - 0.9.
+
+### Projection of each sample into each omics level's components 1 and 2
+```{r}
+#| label: fig-indiv
+#| fig-cap: "Projection of each sample into each omics level's components 1 and 2. Samples are represented based on their components 1 and 2 scores and coloured by cancer subtype. Clearer clustering by cancer subtypes are seen in the mRNA and protein datasets."
+breast_tcga_splsda %>%
+  plotIndiv(
+    ind.names = FALSE,
+    legend = TRUE,
+    title = "TCGA, block sPLS-DA comps 1 - 2"
+  )
+```
+
+Across all datasets, component 1 scores (x axis) are seen to be well separated by cancer subtype across all omics levels. In contrast, component 2 scores (y axis) separate Her2 samples from other subtypes only in protein data.
+
+### Distance between each omics levels' centroid and sample's position
+```{r}
+#| label: fig-arrow
+#| fig-cap: "Distance between each omics levels' centroid and sample's position. Samples are represented based on their components 1 and 2 scores and coloured by cancer subtype. Start of each arrow represent the omics levels' centroid, tip of arrow represents each sample's position."
+breast_tcga_splsda %>%
+  plotArrow(
+    ind.names = FALSE,
+    legend = TRUE
+  )
+```
+
+:::
+
+## Per-variable plots
+
+These plots demonstrate the contribution of each variable to the model.
+
+::: {.panel-tabset}
+### C1 and C2 Loadings: Contribution of each variable to components 1 and 2
+```{r}
+#| warning: False
+#| fig-cap: "Contribution of each variable to components 1 and 2. Variables are represented based on their contribution to components 1 and 2 scores and coloured by omics level."
+breast_tcga_splsda %>%
+  plotVar(
+    var.names = FALSE,
+    legend = TRUE,
+    title = "TCGA, block sPLS-DA comps 1 - 2"
+  )
+```
+
+From this plot, miRNA and mRNA data are seen to be negatively correlated in component 1, white protein data is seen to be positively correlated with both miRNA and mRNA data. Component 2 comprises primarily of miRNA and mRNA data.
+
+### C1 Loadings: Contributions of each variable to component 1 separated by omics level
+```{r}
+#| fig-cap: "Contributions of each variable to component 1 separated by omics level. The most important variables, based on their loadings, are sorted bottom to top."
+breast_tcga_splsda %>%
+  plotLoadings(
+    comp = 1,
+    contrib = "max",
+    method = "median"
+  )
+```
+
+From this plot, component 1 is seen to primarily classify basal samples from LumA samples. This supports the findings of @fig-diablo and @fig-indiv, where Basal and LumA clusters are well-defined.
+
+### C2 Loadings: Contributions of each variable to component 2 separated by omics level
+```{r}
+#| fig-cap: "Contributions of each variable to component 2 separated by omics level. The most important variables, based on their loadings, are sorted bottom to top."
+breast_tcga_splsda %>%
+  plotLoadings(
+    comp = 2,
+    contrib = "max",
+    method = "median"
+  )
+```
+
+From this plot, component 2 is seen to primarily classify Her2 samples from LumA samples. Interestingly, the protein data in this component can classify all three cancer subtypes.
+
+### Correlation between variables in different omics in circos plot
+```{r}
+#| fig-cap: "Correlation between variables in different omics in circos plot. Only correlations greater than 0.7 are shown. Internal connecting lines between omics levels show pairwise correlations between variables in each of these omics levels."
+breast_tcga_splsda %>%
+  circosPlot(
+    cutoff = 0.7,
+    line = TRUE,
+    color.cor = c("red", "blue")
+  )
+```
+
+In this plot, negative correlations are shown to occur between only miRNA and other omics levels, whereas positive correlations are shown to occur between all omics levels. The features that are most highly correlated (i.e. connected by lines) are shown to be highly variable between cancer subtypes, suggesting that these features are important for classification.
+
+:::
+
+## Model performance
+
+Model performance was assessed using:
+
+- Cross-validation within training dataset
+- Validation against test dataset
+
+### Cross-validation within training dataset
+
+Cross-validation was performed using 10-fold cross-validation with 10 repeats within the 150 training samples. The weighted vote error rate is shown:
+
+```{r}
+breast_tcga_splsda_perf <- breast_tcga_splsda %>%
+  perf(
+    validation = "Mfold",
+    folds = 10,
+    nrepeat = 10,
+    dist = "centroids.dist"
+  )
+
+breast_tcga_splsda_perf$MajorityVote.error.rate %>%
+  print()
+
+```
+
+#### ROC and AUC plot per omics level
+```{r}
+#| include: False
+grid <- map(
+  names(breast_tcga_splsda$X),
+  \(omics_level) {
+    ### Build list of AUC calculations
+    object <- auroc(
+      breast_tcga_splsda,
+      roc.block = omics_level,
+      roc.comp = 2,
+      print = FALSE
+    )
+
+    ### Extract and return just the plot
+    plot <- object[[str_c("graph.", omics_level)]][["comp2"]]
+
+    return(plot)
+  }
+) %>%
+  wrap_plots(nrow = 3)
+
+```
+```{r}
+#| fig-cap: "ROC and AUC plot per omics level."
+#| fig-height: 14
+#| fig-width: 7
+plot(grid)
+```
+
+This plot demonstrates that the Her2 subtype is the most difficult to classific by this model, with sensitivity and specificity consistently weaker than other subtypes. This is supported by other evaluation figures, such as @fig-diablo and @fig-indiv, where the Her2 samples were not shown to be clearly separated from other cancer subtypes.
+
+### Validation against test dataset
+
+The model was used to classify 70 test samples from the TCGA breast cancer dataset by the 3 subtypes: Basal, Her2, LumA. Only mRNA and miRNA data was used for classification. The first 2 components of the model were used for classification.
+
+```{r}
+breast_tcga_test <- list(
+  mrna = breast.TCGA$data.test$mrna,
+  mirna = breast.TCGA$data.test$mirna
+)
+
+## Perform prediction
+breast_tcga_test_predict <- predict(
+  breast_tcga_splsda,
+  newdata = breast_tcga_test
+)
+
+## Check prediction performance using confusion matrix.
+## Use 2 components in model.
+breast_tcga_test_confmatrix <- get.confusion_matrix(
+  truth = breast.TCGA$data.test$subtype,
+  predicted = breast_tcga_test_predict$WeightedVote$centroids.dist[, 2]
+)
+
+print(breast_tcga_test_confmatrix)
+```
+
+The confusion matrix demonstrated good performance, with the following errors:
+
+- `{r} breast_tcga_test_confmatrix[1, 2]` Basal sample defined as Her2.
+- `{r} breast_tcga_test_confmatrix[1, 3]` Basal sample defined as LumA.
+- `{r} breast_tcga_test_confmatrix[2, 1]` Her2 sample defined as Basal.
+- `{r} breast_tcga_test_confmatrix[2, 3]` Her2 sample defined as LumA.
+- `{r} breast_tcga_test_confmatrix[3, 1]` LumA sample defined as Basal.
+- `{r} breast_tcga_test_confmatrix[3, 2]` LumA sample defined as Her2.
+
+The remaining `{r} 70 - sum(diag(breast_tcga_test_confmatrix))` samples were correctly classified.
+
+The error rate of this model is `{r} breast_tcga_test_confmatrix %>% get.BER() %>% round(3)`.

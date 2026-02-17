@@ -77,6 +77,7 @@ breast_tcga_ncomp <- breast_tcga_plsda_test_perf$choice.ncomp$WeightedVote %>%
 
 # Select variables for sPLS-DA
 ## Define tuning parameters; start from 5 variables then gradually increase
+## NOTE: The number of workers is set in the .Rprofile file.
 breast_tcga_tune_nvars <- list(
   mrna = c(seq(5, 9, 2), seq(10, 25, 5)),
   mirna = c(seq(5, 9, 2), seq(10, 25, 5)),
@@ -93,10 +94,10 @@ breast_tcga_tune <- tune.block.splsda(
   folds = 5,
   nrepeat = 2,
   dist = "centroids.dist",
-  BPPARAM =
+  BPPARAM = current_bpparam
 )
 
-## Get selected variables
+## Get the number of selected variables for each component.
 breast_tcga_keep_vars <- breast_tcga_tune$choice.keepX
 
 # Save data
@@ -112,7 +113,7 @@ saveRDS(
   here::here("output/breast_tcga_ncomp.rds")
 )
 
-## Save the selected variables
+## Save the selected variables per component
 saveRDS(
   breast_tcga_keep_vars,
   here::here("output/breast_tcga_keep_vars.rds")
